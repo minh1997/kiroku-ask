@@ -1,9 +1,17 @@
-# n8n video summary & Q&A (Postgres + Docker)
+# kiroku-ask
 
-Ask questions about anything that appears in a video — speech, on-screen text, visuals, links — by **date** or by **video title**. No vector database: everything is stored with timestamps and looked up with SQL.
+**Ask your video recordings anything.** *Kiroku* (記録) is Japanese for "record": kiroku-ask turns livestreams and video files into a timestamped record — what was said, what was shown on screen, which links were opened — and lets you chat with it.
+
+- **Ask by date or by title:** "What was yesterday's stream about?", "In the lipstick video, when does the red shirt appear?", "What discount code was on the slide?"
+- **Answers point to the moment:** every answer carries a `[hh:mm:ss]` timestamp, and YouTube videos get a link that jumps to that second.
+- **Four layers per video:** transcript, summary, on-screen text (OCR) and a visual scene log, plus every link seen or spoken.
+- **YouTube or local files:** public YouTube videos are ingested inside n8n; private recordings are processed on your own GPU machine, and only text is sent to the server.
+- **Plain SQL, no vector database:** everything is stored in Postgres with timestamps; the AI agent reads it through read-only tools.
+
+Built with n8n, Postgres, Gemini, Whisper and OCR, running in Docker.
 
 ```
-n8n-livestream/
+kiroku-ask/
 ├── docker-compose.yml          # n8n + shared Postgres 16 (+ optional Caddy HTTPS for a VPS)
 ├── Caddyfile                   # HTTPS reverse proxy when running on a VPS
 ├── .env.example                # passwords and keys — copy to .env
@@ -60,7 +68,8 @@ The videos and users are Vietnamese, so summaries, scene descriptions and agent 
 ## 1. Start
 
 ```bash
-cd n8n-livestream
+git clone https://github.com/minh1997/kiroku-ask.git
+cd kiroku-ask
 cp .env.example .env
 openssl rand -hex 32      # paste the output into N8N_ENCRYPTION_KEY
 # change the passwords in .env

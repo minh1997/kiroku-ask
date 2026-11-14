@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Ingest a video file into the livestream database so the n8n agent can answer questions about it.
+"""kiroku-ask: ingest a video file into the livestream database so the n8n agent can answer questions about it.
 
 Examples:
   export GEMINI_API_KEY=...
@@ -41,7 +41,7 @@ def make_video_id(path: Path) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(description="Ingest a video file for the n8n Q&A agent")
+    p = argparse.ArgumentParser(description="kiroku-ask: ingest a video file for the n8n Q&A agent")
     p.add_argument("video", type=Path, help="Path to the video file")
     p.add_argument("--date", help="Date of the video, YYYY-MM-DD (default: file modification date)")
     p.add_argument("--title", help="Title (default: file name)")

@@ -1,4 +1,4 @@
-# Video file ingestion tool (runs on your machine)
+# kiroku-ask extractor: ingest video files on your machine
 
 Runs **on your own machine** (PC with an NVIDIA GPU or Apple Silicon Mac), not in Docker, so it can use the GPU. It reads a video file and writes the results as text to the Postgres of the n8n stack — usually on a VPS, reached through an SSH tunnel. The video file never passes through the VPS.
 
@@ -16,7 +16,7 @@ Each video becomes 4 kinds of data, all timestamped:
 If Postgres was already running before, add the new tables (run once):
 
 ```bash
-cd ..   # back to the n8n-livestream folder
+cd ..   # back to the kiroku-ask folder
 docker compose exec postgres sh -c \
   'psql -U "$POSTGRES_USER" -d livestream -f /docker-entrypoint-initdb.d/03-local-video.sql'
 ```
