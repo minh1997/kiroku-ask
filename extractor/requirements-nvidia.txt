@@ -1,0 +1,14 @@
+-r requirements.txt
+
+# Speech-to-text on NVIDIA GPUs
+faster-whisper>=1.1
+
+# On-screen text OCR. PaddleOCR reads small text better than EasyOCR.
+# The GPU build must match your CUDA version, see:
+#   https://www.paddlepaddle.org.cn/install/quick
+# CPU build (slower but easy to install): uncomment the line below
+# paddlepaddle>=3.0
+paddleocr>=3.0
+
+# Fallback if PaddleOCR will not install
+# easyocr>=1.7

@@ -1,0 +1,5 @@
+# Shared by both platforms
+requests>=2.32
+psycopg[binary]>=3.2
+pillow>=10.4
+numpy>=1.26

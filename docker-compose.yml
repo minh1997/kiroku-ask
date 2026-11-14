@@ -1,0 +1,96 @@
+# n8n + one shared Postgres container
+# - Database "n8n"        : n8n's own workflows, credentials and execution history
+# - Database "livestream" : livestream data (created automatically on first start)
+#
+# Local machine:    docker compose up -d                  -> http://localhost:5678
+# VPS with HTTPS:   docker compose --profile https up -d  -> https://N8N_HOST (via Caddy)
+# Postgres and n8n bind to 127.0.0.1 only and are never exposed to the Internet.
+# See "Running on a VPS" in README.md.
+
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      # Used by init-db/01-livestream.sh to create the users of the livestream database
+      LIVESTREAM_APP_PASSWORD: ${LIVESTREAM_APP_PASSWORD}
+      LIVESTREAM_READER_PASSWORD: ${LIVESTREAM_READER_PASSWORD}
+      TZ: Asia/Ho_Chi_Minh
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # These scripts run ONCE, only while the postgres_data volume is empty
+      - ./init-db:/docker-entrypoint-initdb.d:ro
+    ports:
+      # localhost ONLY. The personal machine (extractor, DBeaver...) connects through an SSH tunnel:
+      #   ssh -N -o ServerAliveInterval=30 -L 5433:127.0.0.1:5432 user@VPS_IP
+      # Do NOT change this to "5432:5432" — that exposes Postgres to the Internet.
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  n8n:
+    # Pin a specific version (e.g. docker.n8n.io/n8nio/n8n:1.xx.x) in production
+    image: docker.n8n.io/n8nio/n8n:latest
+    restart: unless-stopped
+    environment:
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: 5432
+      DB_POSTGRESDB_DATABASE: ${POSTGRES_DB}
+      DB_POSTGRESDB_USER: ${POSTGRES_USER}
+      DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD}
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+      N8N_HOST: ${N8N_HOST}
+      N8N_PROTOCOL: ${N8N_PROTOCOL}
+      WEBHOOK_URL: ${WEBHOOK_URL}
+      # false when accessed over plain http://localhost (no HTTPS)
+      N8N_SECURE_COOKIE: ${N8N_SECURE_COOKIE}
+      # Number of reverse proxies in front of n8n (1 behind Caddy) so n8n sees the real client IP
+      N8N_PROXY_HOPS: ${N8N_PROXY_HOPS:-0}
+      GENERIC_TIMEZONE: Asia/Ho_Chi_Minh
+      TZ: Asia/Ho_Chi_Minh
+      N8N_RUNNERS_ENABLED: "true"
+      # Keep 14 days of execution history so the database does not balloon (transcripts are large)
+      EXECUTIONS_DATA_PRUNE: "true"
+      EXECUTIONS_DATA_MAX_AGE: 336
+    ports:
+      # localhost only. On a VPS, go through Caddy (HTTPS); for direct access use
+      #   ssh -N -L 5678:127.0.0.1:5678 user@VPS_IP
+      - "127.0.0.1:5678:5678"
+    volumes:
+      - n8n_data:/home/node/.n8n
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # HTTPS reverse proxy for a VPS: obtains a Let's Encrypt certificate for N8N_HOST.
+  # Runs only when the profile is enabled:  docker compose --profile https up -d
+  # Requires: DNS for N8N_HOST pointing at the VPS IP, firewall open on ports 80 and 443.
+  caddy:
+    image: caddy:2
+    profiles: ["https"]
+    restart: unless-stopped
+    environment:
+      N8N_HOST: ${N8N_HOST}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - n8n
+
+volumes:
+  postgres_data:
+  n8n_data:
+  caddy_data:
+  caddy_config:

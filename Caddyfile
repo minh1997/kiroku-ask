@@ -1,0 +1,6 @@
+# HTTPS reverse proxy for n8n (used with: docker compose --profile https up -d).
+# Caddy obtains and renews a Let's Encrypt certificate for the domain in N8N_HOST.
+{$N8N_HOST} {
+	encode gzip
+	reverse_proxy n8n:5678
+}

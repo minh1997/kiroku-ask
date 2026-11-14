@@ -1,0 +1,412 @@
+{
+  "name": "Livestream 2 - Q&A chat",
+  "nodes": [
+    {
+      "parameters": {
+        "options": {}
+      },
+      "id": "9fb33ccf-3921-44c4-aa8c-4d0c00e24d7f",
+      "name": "Chat message received",
+      "type": "@n8n/n8n-nodes-langchain.chatTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        0,
+        300
+      ],
+      "webhookId": "a6bd2e84-899b-4af6-b691-32f62f71c114"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.chatInput }}",
+        "options": {
+          "systemMessage": "=You answer questions about the livestreams and videos stored in the database.\n\nToday is {{ $now.setZone('Asia/Ho_Chi_Minh').toFormat('cccc, yyyy-MM-dd') }}, Vietnam time zone.\n\nHow to work:\n1. Work out which date the user means and convert it to YYYY-MM-DD. Understand relative phrases such as \"yesterday\", \"last Tuesday\" or \"28/10\" (when no year is given, use the most recent year that is not after today).\n2. Call find_by_date with that date.\n   - No result: say clearly that no livestream is stored for that date; you may call list_recent to suggest dates that do have data. Never make up content.\n   - Several streams on the same day: list start time + title and ask which one the user means, unless the question already makes it clear.\n3. General questions (\"what was it about\", \"summarize it\"): answer from the summary column.\n4. Detailed questions the summary cannot answer: call read_transcript with the video_id and answer from the full transcript.\n5. When you refer to a specific moment, always include its [hh:mm:ss] timestamp. If the video has a url (YouTube video), also add a link of the form <url>&t=<seconds>s so the user can jump straight there (e.g. [01:02:03] → &t=3723s). If url is empty (video ingested from a local file), do NOT build a link: give only the timestamp, plus the file name (file_path) if the user needs to find it.\n6. If the user follows up without naming a date (\"anything else?\"), assume they mean the livestream just discussed.\n7. \"Which streams are there\", \"the latest stream\": call list_recent.\n7b. The user names a video by TITLE instead of date (\"the lipstick stream\", \"the phone review video\"): call find_by_title with a few words from the title; they do not need to be exact or in order. If several videos match, list date + title and let the user choose.\n\nQuestions about VISUALS (clothing, colours, objects, products, slides, the screen, \"when does ... appear\"):\n8. Check visual_analyzed_at from find_by_date / find_by_title. If it is empty: say that the visuals of that stream have not been analyzed yet (workflow 3 or extractor/ingest_video.py needs to run), then answer only what the speech covers.\n9. Call search_scenes with the video_id and SEVERAL synonymous keywords separated by commas. For example \"red shirt\" → \"áo đỏ, đỏ, màu đỏ, váy đỏ, áo khoác đỏ\"; \"pricing slide\" → \"giá, bảng giá, giá tiền, khuyến mãi, giảm giá, slide\". Each keyword must be at least 2 characters; avoid overly generic words.\n   Results may include scenes that do not match the intent; read the description to filter them. Join adjacent scenes into one time range in your answer.\n10. If search_scenes finds nothing or too little and the question is phrased unusually: call read_scene_log and read the whole log yourself.\n11. Questions about specific TEXT on screen (product name, price, discount code, slide title, comment text): call search_screen_text. It searches OCR data, so the text is more exact than in the scene log. Requires ocr_at to be set.\n12. To confirm a small detail that neither the scene log nor the OCR records: call rewatch_segment for just that time range (at most 3 minutes per call), never for the whole stream. This tool ONLY works for videos that have a url (YouTube) and are public; for videos ingested from a file do not call it — say that you can only answer from the stored data and give the timestamp so the user can open the file themselves.\n13. Questions about links / web pages opened or mentioned: call list_links. Say whether each link was seen on screen or only spoken, and when.\n\nThe data is in Vietnamese, so keywords sent to search_scenes, search_screen_text and find_by_title MUST be Vietnamese WITH diacritics (e.g. \"áo đỏ\", not \"ao do\").\n\nAnswer in the user's language (usually Vietnamese), briefly and clearly. Transcripts are produced by AI, so proper names may be misspelled; the scene log is written by AI, so timestamps may be off by a few seconds; OCR text may have a few wrong characters when the on-screen text is very small.",
+          "maxIterations": 12
+        }
+      },
+      "id": "215d0471-1c39-4b34-9f75-1c7e55ce3931",
+      "name": "Livestream assistant",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3,
+      "position": [
+        300,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "list",
+          "value": "gpt-5-mini"
+        },
+        "options": {}
+      },
+      "id": "48c135fa-6cac-48c5-8626-e5de0a9ef809",
+      "name": "Assistant model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        140,
+        540
+      ]
+    },
+    {
+      "parameters": {
+        "sessionIdType": "customKey",
+        "sessionKey": "={{ $('Chat message received').first().json.sessionId }}",
+        "contextWindowLength": 10
+      },
+      "id": "4497a4b7-8753-4e53-ac08-ce0c98dac974",
+      "name": "Conversation memory",
+      "type": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
+      "typeVersion": 1.3,
+      "position": [
+        300,
+        540
+      ]
+    },
+    {
+      "parameters": {
+        "descriptionType": "manual",
+        "toolDescription": "Find livestreams by date (Vietnam time). Returns video_id, title, link, start time, duration, whether visuals/OCR are available, and the summary. Parameter: date as YYYY-MM-DD.",
+        "operation": "executeQuery",
+        "query": "SELECT video_id, title, url, file_path, source,\n       to_char(started_at AT TIME ZONE 'Asia/Ho_Chi_Minh', 'HH24:MI') AS start_time,\n       round(duration_seconds / 60.0) AS duration_minutes,\n       visual_analyzed_at,\n       ocr_at,\n       summary\nFROM livestreams\nWHERE stream_date = $1::date\nORDER BY started_at NULLS LAST, id;",
+        "options": {
+          "queryReplacement": "={{ [ $fromAI('date', 'Stream date to look up, formatted YYYY-MM-DD', 'string') ] }}"
+        }
+      },
+      "id": "9426387a-6ce6-48f1-9890-cad59733693d",
+      "name": "find_by_date",
+      "type": "n8n-nodes-base.postgresTool",
+      "typeVersion": 2.5,
+      "position": [
+        480,
+        540
+      ],
+      "notes": "Uses the livestream_reader credential (read-only)."
+    },
+    {
+      "parameters": {
+        "descriptionType": "manual",
+        "toolDescription": "Read the full transcript (with [hh:mm:ss] timestamps) of one livestream by video_id. Use only when the summary is not enough for a detailed question.",
+        "operation": "executeQuery",
+        "query": "SELECT title, url, file_path, stream_date, transcript\nFROM livestreams\nWHERE video_id = $1;",
+        "options": {
+          "queryReplacement": "={{ [ $fromAI('video_id', 'video_id from find_by_date or find_by_title', 'string') ] }}"
+        }
+      },
+      "id": "f7d429b0-2120-4701-a8b7-2f55bba291fa",
+      "name": "read_transcript",
+      "type": "n8n-nodes-base.postgresTool",
+      "typeVersion": 2.5,
+      "position": [
+        640,
+        540
+      ],
+      "notes": "Uses the livestream_reader credential (read-only)."
+    },
+    {
+      "parameters": {
+        "descriptionType": "manual",
+        "toolDescription": "List the 30 most recent stored livestreams (date, start time, title, video_id, source). No parameters.",
+        "operation": "executeQuery",
+        "query": "SELECT stream_date,\n       to_char(started_at AT TIME ZONE 'Asia/Ho_Chi_Minh', 'HH24:MI') AS start_time,\n       title, video_id, source\nFROM livestreams\nORDER BY stream_date DESC, started_at DESC NULLS LAST\nLIMIT 30;",
+        "options": {}
+      },
+      "id": "2dd9d40e-8bdd-46a8-908f-93e0ed21cf35",
+      "name": "list_recent",
+      "type": "n8n-nodes-base.postgresTool",
+      "typeVersion": 2.5,
+      "position": [
+        800,
+        540
+      ],
+      "notes": "Uses the livestream_reader credential (read-only)."
+    },
+    {
+      "parameters": {
+        "descriptionType": "manual",
+        "toolDescription": "Search the visual scene log of one livestream for keywords (clothing, colours, objects, products, slides, on-screen text). Parameters: video_id and a comma-separated list of Vietnamese keywords WITH diacritics, ideally several synonyms. Returns time range, number of matching keywords, description and on-screen text.",
+        "operation": "executeQuery",
+        "query": "WITH k AS (\n  SELECT lower(trim(x)) AS kw\n  FROM unnest(string_to_array($2, ',')) AS x\n  WHERE length(trim(x)) >= 2\n), s AS (\n  SELECT start_sec, end_sec, description, on_screen_text,\n         (SELECT count(*) FROM k\n          WHERE lower(vs.description || ' ' || coalesce(vs.on_screen_text, '') || ' ' || coalesce(vs.keywords, ''))\n                LIKE '%' || k.kw || '%') AS match_count\n  FROM video_scenes vs\n  WHERE vs.video_id = $1\n)\nSELECT to_char(make_interval(secs => start_sec), 'HH24:MI:SS') AS start_time,\n       to_char(make_interval(secs => end_sec), 'HH24:MI:SS') AS end_time,\n       start_sec, end_sec, match_count, description, on_screen_text\nFROM s\nWHERE match_count > 0\nORDER BY match_count DESC, start_sec\nLIMIT 60;",
+        "options": {
+          "queryReplacement": "={{ [ $fromAI('video_id', 'video_id of the livestream (from find_by_date)', 'string'), $fromAI('keywords', 'Comma-separated Vietnamese keywords with diacritics, e.g. áo đỏ, đỏ, màu đỏ', 'string') ] }}"
+        }
+      },
+      "id": "ad7eb845-212d-404a-8960-12bb9dafdf04",
+      "name": "search_scenes",
+      "type": "n8n-nodes-base.postgresTool",
+      "typeVersion": 2.5,
+      "position": [
+        960,
+        540
+      ],
+      "notes": "Uses the livestream_reader credential (read-only)."
+    },
+    {
+      "parameters": {
+        "descriptionType": "manual",
+        "toolDescription": "Read the whole visual scene log (every scene with time range, description and on-screen text) of one livestream. Use when search_scenes is not enough or the question needs the big picture.",
+        "operation": "executeQuery",
+        "query": "SELECT count(*) AS scene_count,\n       string_agg(\n         '[' || to_char(make_interval(secs => start_sec), 'HH24:MI:SS') || '-' ||\n                to_char(make_interval(secs => end_sec), 'HH24:MI:SS') || '] ' || description ||\n         CASE WHEN coalesce(on_screen_text, '') <> '' THEN ' | Text: ' || on_screen_text ELSE '' END,\n         E'\\n' ORDER BY start_sec) AS scene_log\nFROM video_scenes\nWHERE video_id = $1;",
+        "options": {
+          "queryReplacement": "={{ [ $fromAI('video_id', 'video_id of the livestream (from find_by_date)', 'string') ] }}"
+        }
+      },
+      "id": "73566aef-6d1d-42d7-8065-5e8866a318ac",
+      "name": "read_scene_log",
+      "type": "n8n-nodes-base.postgresTool",
+      "typeVersion": 2.5,
+      "position": [
+        1120,
+        540
+      ],
+      "notes": "Uses the livestream_reader credential (read-only)."
+    },
+    {
+      "parameters": {
+        "descriptionType": "manual",
+        "toolDescription": "List the links / web pages shown on screen or read out in one livestream: url, first appearance, count, source (screen/speech), context.",
+        "operation": "executeQuery",
+        "query": "SELECT url,\n       to_char(make_interval(secs => min(at_sec)), 'HH24:MI:SS') AS first_seen,\n       min(at_sec) AS first_seen_sec,\n       count(*) AS times,\n       string_agg(DISTINCT source, ', ') AS source,\n       (array_agg(context ORDER BY at_sec))[1] AS context\nFROM video_links\nWHERE video_id = $1\nGROUP BY url\nORDER BY min(at_sec);",
+        "options": {
+          "queryReplacement": "={{ [ $fromAI('video_id', 'video_id of the livestream (from find_by_date)', 'string') ] }}"
+        }
+      },
+      "id": "0e24724c-082f-4d0d-8584-bc138d8a7bb0",
+      "name": "list_links",
+      "type": "n8n-nodes-base.postgresTool",
+      "typeVersion": 2.5,
+      "position": [
+        1280,
+        540
+      ],
+      "notes": "Uses the livestream_reader credential (read-only)."
+    },
+    {
+      "parameters": {
+        "descriptionType": "manual",
+        "toolDescription": "Let the AI re-watch a short segment (at most 3 minutes) of a YouTube video to answer a detailed visual question the scene log does not cover. Costs money; use only when really needed. Parameters: video_id, start_sec, end_sec, question.",
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  contents: [{\n    role: 'user',\n    parts: [\n      {\n        fileData: { fileUri: 'https://www.youtube.com/watch?v=' + $fromAI('video_id', 'video_id of the livestream', 'string') },\n        videoMetadata: {\n          startOffset: Math.max(0, Math.floor($fromAI('start_sec', 'Second where the segment to re-watch starts (from the start of the video)', 'number'))) + 's',\n          endOffset: Math.ceil($fromAI('end_sec', 'Second where the segment ends, at most 180 seconds after start_sec', 'number')) + 's',\n          fps: 2\n        }\n      },\n      { text: 'This is a segment of a livestream. Answer in Vietnamese, precisely, based only on what is seen and heard in this segment; give the time (seconds from the start of the segment) when relevant. Question: ' + $fromAI('question', 'Specific question about the visuals in this segment', 'string') }\n    ]\n  }],\n  generationConfig: { mediaResolution: 'MEDIA_RESOLUTION_HIGH', thinkingConfig: { thinkingLevel: 'LOW' } }\n}) }}",
+        "options": {
+          "timeout": 300000
+        },
+        "optimizeResponse": true,
+        "responseType": "json",
+        "dataField": "candidates",
+        "fieldsToInclude": "selected",
+        "fields": "content"
+      },
+      "id": "ba3e2629-277e-42c3-9408-3e768b94a5c4",
+      "name": "rewatch_segment",
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.2,
+      "position": [
+        1440,
+        540
+      ],
+      "notes": "Credential: Gemini (Header Auth, name x-goog-api-key). Works only with public videos."
+    },
+    {
+      "parameters": {
+        "descriptionType": "manual",
+        "toolDescription": "Search the text read off the video screen (OCR data) for keywords: product names, prices, discount codes, slide titles, URLs. More exact than the scene log. Parameters: video_id and a comma-separated list of Vietnamese keywords WITH diacritics.",
+        "operation": "executeQuery",
+        "query": "WITH k AS (\n  SELECT lower(trim(x)) AS kw\n  FROM unnest(string_to_array($2, ',')) AS x\n  WHERE length(trim(x)) >= 2\n)\nSELECT to_char(make_interval(secs => start_sec), 'HH24:MI:SS') AS start_time,\n       to_char(make_interval(secs => end_sec), 'HH24:MI:SS') AS end_time,\n       start_sec, end_sec,\n       (SELECT count(*) FROM k WHERE lower(st.text) LIKE '%' || k.kw || '%') AS match_count,\n       text\nFROM screen_text st\nWHERE st.video_id = $1\n  AND EXISTS (SELECT 1 FROM k WHERE lower(st.text) LIKE '%' || k.kw || '%')\nORDER BY match_count DESC, start_sec\nLIMIT 60;",
+        "options": {
+          "queryReplacement": "={{ [ $fromAI('video_id', 'video_id of the livestream', 'string'), $fromAI('keywords', 'Comma-separated keywords to find in the on-screen text', 'string') ] }}"
+        }
+      },
+      "id": "029423bc-a9df-43f2-9e29-7afc445b739a",
+      "name": "search_screen_text",
+      "type": "n8n-nodes-base.postgresTool",
+      "typeVersion": 2.5,
+      "position": [
+        1600,
+        540
+      ],
+      "notes": "Uses the livestream_reader credential (read-only)."
+    },
+    {
+      "parameters": {
+        "descriptionType": "manual",
+        "toolDescription": "Find videos by TITLE when the user does not give a date. Parameter: a few Vietnamese words WITH diacritics from the title (need not be exact or in order). Results are ranked by matching words. Returns date, title, video_id, source (youtube/file) and whether a scene log / OCR is available.",
+        "operation": "executeQuery",
+        "query": "WITH k AS (\n  SELECT DISTINCT trim(x) AS kw\n  FROM regexp_split_to_table(coalesce($1, ''), '[\\s,]+') AS x\n  WHERE length(trim(x)) >= 2\n), v AS (\n  SELECT l.*,\n         (SELECT count(*) FROM k WHERE coalesce(l.title, '') ILIKE '%' || k.kw || '%') AS match_count,\n         coalesce(l.title, '') ILIKE '%' || trim($1) || '%' AS whole_phrase\n  FROM livestreams l\n)\nSELECT video_id, stream_date, title, url, file_path, source,\n       round(duration_seconds / 60.0) AS duration_minutes,\n       visual_analyzed_at,\n       ocr_at,\n       match_count,\n       left(coalesce(summary, ''), 300) AS summary_excerpt\nFROM v\nWHERE match_count > 0\nORDER BY whole_phrase DESC, match_count DESC, stream_date DESC\nLIMIT 20;",
+        "options": {
+          "queryReplacement": "={{ [ $fromAI('title_words', 'A few words from the video title, e.g. son môi', 'string') ] }}"
+        }
+      },
+      "id": "32e5be12-ddf5-4c11-8603-47dadd39f679",
+      "name": "find_by_title",
+      "type": "n8n-nodes-base.postgresTool",
+      "typeVersion": 2.5,
+      "position": [
+        1760,
+        540
+      ],
+      "notes": "Uses the livestream_reader credential (read-only)."
+    },
+    {
+      "parameters": {
+        "content": "## Video Q&A by date or by title\nExamples: *\"What was yesterday's video about?\"*, *\"In the lipstick stream, when does the red shirt appear?\"*, *\"Which links were opened in this video?\"*, *\"What price is on the slide?\"*\n\n- The 8 Postgres tools use **livestream_reader** (read-only).\n- `rewatch_segment` has Gemini re-watch part of a video — public YouTube videos only.\n- Data comes from **workflows 1 + 3** (YouTube videos) or **extractor/ingest_video.py** (local files).\n- To use Telegram: replace the chat node with a Telegram Trigger, add a Telegram node that sends `$json.output`, and set sessionKey to the chat id.",
+        "height": 320,
+        "width": 560
+      },
+      "id": "3cc36ba2-04fd-4118-9827-b6bcc9822a54",
+      "name": "Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -40,
+        -160
+      ]
+    }
+  ],
+  "connections": {
+    "Chat message received": {
+      "main": [
+        [
+          {
+            "node": "Livestream assistant",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Assistant model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Livestream assistant",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Conversation memory": {
+      "ai_memory": [
+        [
+          {
+            "node": "Livestream assistant",
+            "type": "ai_memory",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "find_by_date": {
+      "ai_tool": [
+        [
+          {
+            "node": "Livestream assistant",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "read_transcript": {
+      "ai_tool": [
+        [
+          {
+            "node": "Livestream assistant",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "list_recent": {
+      "ai_tool": [
+        [
+          {
+            "node": "Livestream assistant",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "search_scenes": {
+      "ai_tool": [
+        [
+          {
+            "node": "Livestream assistant",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "read_scene_log": {
+      "ai_tool": [
+        [
+          {
+            "node": "Livestream assistant",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "list_links": {
+      "ai_tool": [
+        [
+          {
+            "node": "Livestream assistant",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "rewatch_segment": {
+      "ai_tool": [
+        [
+          {
+            "node": "Livestream assistant",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "search_screen_text": {
+      "ai_tool": [
+        [
+          {
+            "node": "Livestream assistant",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "find_by_title": {
+      "ai_tool": [
+        [
+          {
+            "node": "Livestream assistant",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Ho_Chi_Minh"
+  },
+  "pinData": {}
+}

@@ -1,0 +1,9 @@
+-r requirements.txt
+
+# Speech-to-text on Apple Silicon (Metal via MLX)
+mlx-whisper>=0.4
+
+# OCR: EasyOCR runs well on Apple Silicon (PyTorch).
+# PaddleOCR is usually hard to install on macOS arm64, so EasyOCR is the default here.
+easyocr>=1.7
+torch>=2.4

@@ -1,0 +1,246 @@
+{
+  "name": "Livestream 3 - Visual analysis",
+  "nodes": [
+    {
+      "parameters": {
+        "formTitle": "Livestream visual analysis",
+        "formDescription": "The video must already be ingested with workflow 1 and be public. Gemini watches it in 10-minute chunks and records a scene log and every link that appears.",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "YouTube URL",
+              "placeholder": "https://www.youtube.com/watch?v=...",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Resolution",
+              "fieldType": "dropdown",
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "High (reads links and small text)"
+                  },
+                  {
+                    "option": "Low (about 3x cheaper, small text is hard to read)"
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "options": {
+          "respondWithOptions": {
+            "values": {
+              "formSubmittedText": "Received! A 2-hour stream takes about 10–30 minutes. Check progress under Executions in n8n."
+            }
+          }
+        }
+      },
+      "id": "44a914d9-3492-45fa-8eac-8aada733951f",
+      "name": "Visual analysis form",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.2,
+      "position": [
+        0,
+        300
+      ],
+      "webhookId": "c66893e2-a6b2-443e-a396-a05e6c1026dc"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Get the video ID and resolution from the visual analysis form\nconst form = $('Visual analysis form').first().json;\nconst raw = String(form['YouTube URL'] || '').trim();\n\nconst patterns = [\n  /(?:[?&]v=|\\/live\\/|\\/shorts\\/|\\/embed\\/|youtu\\.be\\/)([A-Za-z0-9_-]{11})/,\n  /^([A-Za-z0-9_-]{11})$/,\n];\nlet videoId = null;\nfor (const p of patterns) {\n  const m = raw.match(p);\n  if (m) { videoId = m[1]; break; }\n}\nif (!videoId) throw new Error('Could not find a video ID in the URL: ' + raw);\n\nconst resolution = String(form['Resolution'] || '').startsWith('Low')\n  ? 'MEDIA_RESOLUTION_LOW'\n  : 'MEDIA_RESOLUTION_HIGH';\n\nreturn [{ json: { video_id: videoId, resolution } }];\n"
+      },
+      "id": "214b7be6-c09e-4ff3-939a-b3186eb3d5e5",
+      "name": "Prepare analysis",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT video_id, title, duration_seconds FROM livestreams WHERE video_id = $1;",
+        "options": {
+          "queryReplacement": "={{ [ $json.video_id ] }}"
+        }
+      },
+      "id": "0c0d7de6-7cf9-4deb-b6c0-6e909cdbac71",
+      "name": "Look up livestream",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        440,
+        300
+      ],
+      "alwaysOutputData": true,
+      "notes": "Credential: Postgres livestream (write)."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Split the video into 10-minute chunks and build a Gemini request for each\nconst CHUNK_SECONDS = 600;  // length of each chunk. Lower it if Gemini reports MAX_TOKENS.\nconst FPS = 1;              // frames per second Gemini watches\n\nconst input = $('Prepare analysis').first().json;\nconst row = $input.first().json;\nif (!row || !row.video_id) {\n  throw new Error(`Video ${input.video_id} is not in the livestreams table yet. Ingest it with workflow 1 first.`);\n}\nconst total = Number(row.duration_seconds);\nif (!total || total <= 0) throw new Error('Unknown video duration (duration_seconds is empty).');\n\nconst url = `https://www.youtube.com/watch?v=${row.video_id}`;\n\nconst schema = {\n  type: 'object',\n  properties: {\n    scenes: {\n      type: 'array',\n      items: {\n        type: 'object',\n        properties: {\n          start_sec: { type: 'integer' },\n          end_sec: { type: 'integer' },\n          description: { type: 'string' },\n          on_screen_text: { type: 'string' },\n          keywords: { type: 'array', items: { type: 'string' } },\n        },\n        required: ['start_sec', 'end_sec', 'description', 'on_screen_text', 'keywords'],\n      },\n    },\n    links: {\n      type: 'array',\n      items: {\n        type: 'object',\n        properties: {\n          at_sec: { type: 'integer' },\n          url: { type: 'string' },\n          source: { type: 'string', enum: ['screen', 'speech'] },\n          context: { type: 'string' },\n        },\n        required: ['at_sec', 'url', 'source', 'context'],\n      },\n    },\n  },\n  required: ['scenes', 'links'],\n};\n\nconst prompt = (length) => `You are watching ONE CHUNK, ${length} seconds long, of the livestream \"${row.title || ''}\".\nTask: write a detailed visual log so that questions like \"when does the red shirt appear\", \"when does the pricing slide show up\" or \"which links did she open\" can be answered later.\n\nTIME: every timestamp is the NUMBER OF SECONDS FROM THE START OF THIS CHUNK (start of chunk = 0, end of chunk = ${length}).\n\n1) scenes: split the chunk into consecutive scenes that cover 0 to ${length} without gaps.\n   Start a new scene on every visible change: slide change, a web page opened or switched, a product picked up or put down, a change of clothes, a new person, a camera angle change, screen sharing starting or stopping.\n   Merge long static stretches into one scene, but no scene may be longer than 60 seconds.\n   - description: in Vietnamese, specific: who (gender, appearance), clothing WITH COLOURS, objects/products with colours, actions, surroundings, what the shared screen shows.\n   - on_screen_text: copy legible text verbatim (slide titles, prices, discount codes, product names, URL in the address bar). Empty string if none.\n   - keywords: 3–10 short phrases in Vietnamese, e.g. the Vietnamese words for \"red shirt\", \"price list\", \"slide\", \"browser\", \"phone\".\n\n2) links: every link, URL or domain name:\n   - source \"screen\": seen in the browser address bar, on a slide, in an image, in a pinned comment... Add one entry each time a NEW web page is opened or navigated to.\n   - source \"speech\": the speaker reads out a link or domain name.\n   - url: copy exactly as seen/heard; if it is not fully legible, write the legible part (e.g. the domain).\n   - context: what the page is and why it was opened.\n\nOnly record what is actually seen or heard. Do not guess, do not make things up.`;\n\nconst items = [];\nfor (let start = 0, chunk = 1; start < total; start += CHUNK_SECONDS, chunk++) {\n  const end = Math.min(start + CHUNK_SECONDS, total);\n  items.push({\n    json: {\n      video_id: row.video_id,\n      chunk,\n      start_sec: start,\n      end_sec: end,\n      body: {\n        contents: [{\n          role: 'user',\n          parts: [\n            {\n              fileData: { fileUri: url },\n              videoMetadata: { startOffset: `${start}s`, endOffset: `${end}s`, fps: FPS },\n            },\n            { text: prompt(end - start) },\n          ],\n        }],\n        generationConfig: {\n          mediaResolution: input.resolution,\n          responseMimeType: 'application/json',\n          responseJsonSchema: schema,\n          thinkingConfig: { thinkingLevel: 'LOW' },\n          maxOutputTokens: 32768,\n        },\n      },\n    },\n  });\n}\nreturn items;\n"
+      },
+      "id": "6f5f38e0-757b-40a9-85a9-4cc292543673",
+      "name": "Split into 10-minute chunks",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}",
+        "options": {
+          "timeout": 600000,
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 3000
+            }
+          }
+        }
+      },
+      "id": "5f07aae3-72ba-4003-8cb2-3d0a0f231542",
+      "name": "Gemini: analyze chunk",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        880,
+        300
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "notes": "Credential: Gemini (Header Auth, name x-goog-api-key). Sends one chunk at a time."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Merge the results of all chunks and convert chunk-relative seconds to video time\nconst chunks = $('Split into 10-minute chunks').all();\nconst outs = $input.all();\n\nconst scenes = [];\nconst links = [];\nlet totalTokens = 0;\n\nconst toInt = (v) => {\n  const n = Math.round(Number(v));\n  return Number.isFinite(n) ? n : null;\n};\n\nchunks.forEach((c, i) => {\n  const { chunk, start_sec: start, end_sec: end } = c.json;\n  const res = outs[i]?.json || {};\n  if (res.error) throw new Error(`Chunk ${chunk}: Gemini error: ${JSON.stringify(res.error).slice(0, 300)}`);\n\n  const cand = (res.candidates || [])[0];\n  // Skip \"thought\" parts, otherwise JSON.parse fails\n  const text = ((cand && cand.content && cand.content.parts) || [])\n    .filter((p) => !p.thought && typeof p.text === 'string')\n    .map((p) => p.text)\n    .join('');\n  if (!text) {\n    throw new Error(`Chunk ${chunk}: Gemini returned nothing (finishReason=${cand?.finishReason}, ${JSON.stringify(res.promptFeedback || {})}). The video must be public.`);\n  }\n  let data;\n  try {\n    data = JSON.parse(text);\n  } catch (e) {\n    throw new Error(`Chunk ${chunk}: invalid JSON (finishReason=${cand?.finishReason}). If it is MAX_TOKENS, lower CHUNK_SECONDS in the \"Split into 10-minute chunks\" node.`);\n  }\n  totalTokens += Number(res.usageMetadata?.totalTokenCount) || 0;\n\n  const rawScenes = Array.isArray(data.scenes) ? data.scenes : [];\n  const rawLinks = Array.isArray(data.links) ? data.links : [];\n\n  // The prompt asks for chunk-relative times; if the model used video time anyway, don't add the offset\n  const length = end - start;\n  const stamps = [\n    ...rawScenes.flatMap((s) => [toInt(s.start_sec), toInt(s.end_sec)]),\n    ...rawLinks.map((l) => toInt(l.at_sec)),\n  ].filter((v) => v !== null);\n  let offset = start;\n  if (start > 0 && stamps.length && Math.max(...stamps) > length + 5 && Math.min(...stamps) >= start - 5) offset = 0;\n  const convert = (v) => Math.min(end, Math.max(start, (toInt(v) ?? 0) + offset));\n\n  for (const s of rawScenes) {\n    const description = String(s.description || '').trim();\n    if (!description) continue;\n    const a = convert(s.start_sec);\n    const b = Math.max(a, convert(s.end_sec));\n    scenes.push({\n      start_sec: a,\n      end_sec: b,\n      description,\n      on_screen_text: String(s.on_screen_text || '').trim(),\n      keywords: (Array.isArray(s.keywords) ? s.keywords : [s.keywords])\n        .map((x) => String(x || '').trim()).filter(Boolean).join(', '),\n    });\n  }\n  for (const l of rawLinks) {\n    const u = String(l.url || '').trim();\n    if (!u) continue;\n    links.push({\n      at_sec: convert(l.at_sec),\n      url: u,\n      source: l.source === 'speech' ? 'speech' : 'screen',\n      context: String(l.context || '').trim(),\n    });\n  }\n});\n\nscenes.sort((a, b) => a.start_sec - b.start_sec);\nlinks.sort((a, b) => a.at_sec - b.at_sec);\n\nreturn [{\n  json: {\n    video_id: chunks[0].json.video_id,\n    chunk_count: chunks.length,\n    scene_count: scenes.length,\n    link_count: links.length,\n    total_tokens: totalTokens,\n    scenes: JSON.stringify(scenes),\n    links: JSON.stringify(links),\n  },\n}];\n"
+      },
+      "id": "b04ad3a4-8102-4643-9643-d8363a30fcb9",
+      "name": "Merge scenes & links",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH delete_scenes AS (\n  DELETE FROM video_scenes WHERE video_id = $1\n), delete_links AS (\n  DELETE FROM video_links WHERE video_id = $1 AND produced_by = 'gemini'\n), insert_scenes AS (\n  INSERT INTO video_scenes (video_id, start_sec, end_sec, description, on_screen_text, keywords)\n  SELECT $1, x.start_sec, x.end_sec, x.description, x.on_screen_text, x.keywords\n  FROM jsonb_to_recordset($2::jsonb)\n       AS x(start_sec int, end_sec int, description text, on_screen_text text, keywords text)\n  RETURNING 1\n), insert_links AS (\n  INSERT INTO video_links (video_id, at_sec, url, source, context, produced_by)\n  SELECT $1, x.at_sec, x.url, x.source, x.context, 'gemini'\n  FROM jsonb_to_recordset($3::jsonb)\n       AS x(at_sec int, url text, source text, context text)\n  RETURNING 1\n), mark_done AS (\n  UPDATE livestreams SET visual_analyzed_at = now() WHERE video_id = $1\n  RETURNING 1\n)\nSELECT $1 AS video_id,\n       (SELECT count(*) FROM insert_scenes) AS scene_count,\n       (SELECT count(*) FROM insert_links) AS link_count;",
+        "options": {
+          "queryReplacement": "={{ [ $json.video_id, $json.scenes, $json.links ] }}"
+        }
+      },
+      "id": "9cc8c08a-8cca-4bee-8563-38f84a08185e",
+      "name": "Save scenes & links",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1320,
+        300
+      ],
+      "notes": "Credential: Postgres livestream (write). Replaces this video's scene log and Gemini links in one statement; links found by OCR (produced_by = 'ocr') are kept."
+    },
+    {
+      "parameters": {
+        "content": "## Livestream visual analysis\n1. The video must already be ingested with workflow 1 (its duration is needed) and be **public**.\n2. Split into 10-minute chunks → Gemini watches each chunk (1 frame/second, with audio).\n3. Save the scene log to `video_scenes` and links to `video_links`.\n\nRe-running on the same video replaces its Gemini data (OCR links are kept). Change the model in the Gemini node URL.\n**Credentials:** Postgres livestream (write), Gemini (Header Auth `x-goog-api-key`).",
+        "height": 260,
+        "width": 560
+      },
+      "id": "4fe15a51-b460-4e1b-a349-7cbfc9cfaa30",
+      "name": "Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -40,
+        -140
+      ]
+    }
+  ],
+  "connections": {
+    "Visual analysis form": {
+      "main": [
+        [
+          {
+            "node": "Prepare analysis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare analysis": {
+      "main": [
+        [
+          {
+            "node": "Look up livestream",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Look up livestream": {
+      "main": [
+        [
+          {
+            "node": "Split into 10-minute chunks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split into 10-minute chunks": {
+      "main": [
+        [
+          {
+            "node": "Gemini: analyze chunk",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini: analyze chunk": {
+      "main": [
+        [
+          {
+            "node": "Merge scenes & links",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge scenes & links": {
+      "main": [
+        [
+          {
+            "node": "Save scenes & links",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Ho_Chi_Minh"
+  },
+  "pinData": {}
+}
