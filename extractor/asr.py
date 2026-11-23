@@ -5,7 +5,9 @@ Backends are imported lazily, so you only need to install the one you actually u
 
 from __future__ import annotations
 
+import platform
 import subprocess
+import sys
 from pathlib import Path
 
 # Default model per backend.
@@ -17,6 +19,17 @@ DEFAULT_MODELS = {
     "faster-whisper": "kiendt/PhoWhisper-large-ct2",
     "mlx-whisper": "mlx-community/whisper-large-v3-mlx",
 }
+
+
+# Loaded faster-whisper models, so a long-running service does not reload them per job
+_FASTER_WHISPER_MODELS: dict[str, object] = {}
+
+
+def default_backend() -> str:
+    """mlx-whisper on Apple Silicon (Metal), faster-whisper everywhere else (CUDA or CPU)."""
+    if sys.platform == "darwin" and platform.machine() == "arm64":
+        return "mlx-whisper"
+    return "faster-whisper"
 
 
 def extract_audio(video: Path, out: Path) -> Path:
@@ -42,13 +55,16 @@ def transcribe(audio: Path, backend: str, model: str | None, language: str = "vi
 def _faster_whisper(audio: Path, model: str, language: str) -> list[dict]:
     from faster_whisper import WhisperModel  # type: ignore
 
-    # CTranslate2 has no Metal backend, so on a Mac this runs on the CPU.
-    try:
-        m = WhisperModel(model, device="cuda", compute_type="float16")
-        print("ASR: faster-whisper on GPU (float16)")
-    except Exception as e:
-        print(f"GPU not available ({e}); running on CPU int8, this will be slower.")
-        m = WhisperModel(model, device="cpu", compute_type="int8")
+    m = _FASTER_WHISPER_MODELS.get(model)
+    if m is None:
+        # CTranslate2 has no Metal backend, so on a Mac this runs on the CPU.
+        try:
+            m = WhisperModel(model, device="cuda", compute_type="float16")
+            print("ASR: faster-whisper on GPU (float16)")
+        except Exception as e:
+            print(f"GPU not available ({e}); running on CPU int8, this will be slower.")
+            m = WhisperModel(model, device="cpu", compute_type="int8")
+        _FASTER_WHISPER_MODELS[model] = m
 
     segments, info = m.transcribe(
         str(audio), language=language, beam_size=5,
@@ -66,8 +82,13 @@ def _faster_whisper(audio: Path, model: str, language: str) -> list[dict]:
 def _mlx_whisper(audio: Path, model: str, language: str) -> list[dict]:
     import mlx_whisper  # type: ignore
 
-    print("ASR: mlx-whisper (Metal, Apple Silicon)")
-    result = mlx_whisper.transcribe(str(audio), path_or_hf_repo=model, language=language)
+    print(f"ASR: mlx-whisper (Metal, Apple Silicon), model {model}")
+    # mlx-whisper caches the loaded model itself. Not conditioning on the previous text
+    # avoids the repetition loops Whisper falls into on long recordings.
+    result = mlx_whisper.transcribe(
+        str(audio), path_or_hf_repo=model, language=language,
+        condition_on_previous_text=False,
+    )
     return [
         {"start": seg["start"], "end": seg["end"], "text": seg["text"]}
         for seg in result.get("segments", [])

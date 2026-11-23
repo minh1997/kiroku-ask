@@ -76,8 +76,8 @@ The tool adds TCP keepalive settings to `PG_DSN` (`keepalives`, `keepalives_idle
 # PC with an NVIDIA GPU
 python ingest_video.py ~/videos/live-10-11.mp4 --date 2026-11-10 --title "Live 10/11"
 
-# Apple Silicon Mac
-python ingest_video.py ~/videos/live-10-11.mp4 --asr mlx-whisper
+# Apple Silicon Mac (mlx-whisper is picked automatically)
+python ingest_video.py ~/videos/live-10-11.mp4
 
 # Whisper will not install: let Gemini transcribe
 python ingest_video.py video.mp4 --asr gemini
@@ -96,8 +96,8 @@ python ingest_video.py video.mp4 --asr none --visual none                # redo 
 
 | Option | Default | Notes |
 |---|---|---|
-| `--asr` | `faster-whisper` | `mlx-whisper` on a Mac, `gemini` if Whisper will not install, `none` to skip |
-| `--whisper-model` | `kiendt/PhoWhisper-large-ct2` | PhoWhisper is VinAI's Whisper fine-tuned for Vietnamese. Try `large-v3` to compare. |
+| `--asr` | `auto` | `mlx-whisper` on Apple Silicon, `faster-whisper` elsewhere. `gemini` if Whisper will not install, `none` to skip |
+| `--whisper-model` | `kiendt/PhoWhisper-large-ct2` (faster-whisper), `mlx-community/whisper-large-v3-mlx` (mlx-whisper) | PhoWhisper is VinAI's Whisper fine-tuned for Vietnamese. `mlx-community/whisper-large-v3-turbo` is several times faster on a Mac. |
 | `--ocr` | `auto` | Tries PaddleOCR first, falls back to EasyOCR |
 | `--language` | `vi` | Language code for ASR and OCR |
 | `--resolution` | `high` | `high` lets Gemini read links and small text; `low` is about 3x cheaper |
@@ -108,7 +108,29 @@ python ingest_video.py video.mp4 --asr none --visual none                # redo 
 
 CTranslate2 (the engine behind faster-whisper) has no Metal backend, so on a Mac faster-whisper only runs on the CPU — that is why `mlx-whisper` exists for Apple Silicon.
 
-## 6. How the OCR step works
+## 6. Local transcription service for n8n (workflow 4)
+
+`transcribe_server.py` lets n8n use the Whisper on this machine. n8n runs in Docker, where a Mac's GPU is not available, so the service runs natively and n8n calls it over HTTP.
+
+```bash
+source .venv/bin/activate
+python transcribe_server.py                    # listens on 127.0.0.1:8765
+python transcribe_server.py --whisper-model mlx-community/whisper-large-v3-turbo   # faster on a Mac
+```
+
+Keep it running while you use workflow 4. It needs no database access and no API key: it takes a YouTube link (downloads only the audio with yt-dlp) or a file path on this machine, runs Whisper, and returns the segments; n8n does the summary and writes to Postgres. Jobs run one at a time and are kept in memory only, so restarting the service forgets them.
+
+- The first job downloads the Whisper model (about 3 GB for large-v3).
+- n8n in Docker Desktop (Mac/Windows) reaches the service at `http://host.docker.internal:8765`. On Linux, `docker-compose.yml` maps that name to the host; start the service with `--host 172.17.0.1` (the Docker bridge address) so containers can reach it, and never with `0.0.0.0` on a machine exposed to the Internet.
+- Check it: `curl localhost:8765/health`.
+
+| Option | Default | Notes |
+|---|---|---|
+| `--asr` | `auto` | `mlx-whisper` on Apple Silicon, `faster-whisper` elsewhere |
+| `--whisper-model` | see `--whisper-model` above | |
+| `--host`, `--port` | `127.0.0.1`, `8765` | If you change the port, also change `LOCAL_ASR_URL` in the *Prepare input* node of workflow 4 |
+
+## 7. How the OCR step works
 
 A 2-hour video at 1 frame per second gives 7,200 images, but most of them are near-identical. The tool:
 
@@ -120,7 +142,7 @@ A 2-hour video at 1 frame per second gives 7,200 images, but most of them are ne
 
 Step 2 only saves time; step 4 decides the final result, so a low `--hash-threshold` still gives correct output, just more slowly.
 
-## 7. Notes
+## 8. Notes
 
 - Gemini can only process **public videos** when given a YouTube link, but an **uploaded file** has no such restriction — which is why the file path works for private videos too.
 - Files uploaded to Gemini are kept for 48 hours and then deleted automatically; the tool also deletes them as soon as it is done.

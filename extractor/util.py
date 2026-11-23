@@ -4,11 +4,20 @@ from __future__ import annotations
 
 import re
 import subprocess
+import unicodedata
 from pathlib import Path
 
 # Each transcript line covers ~30 seconds, the same as workflow 1, so the agent's tools
 # work the same way on YouTube videos and on local files.
 LINE_SECONDS = 30
+
+
+def make_video_id(path: Path) -> str:
+    """Stable ID derived from the file name, so re-running the same file updates the same row."""
+    s = unicodedata.normalize("NFD", path.stem)
+    s = "".join(c for c in s if unicodedata.category(c) != "Mn").lower()
+    s = re.sub(r"[^a-z0-9]+", "-", s).strip("-")
+    return ("file-" + s)[:120] or "file-unnamed"
 
 
 def hms(seconds: float) -> str:

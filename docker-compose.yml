@@ -65,6 +65,11 @@ services:
       - "127.0.0.1:5678:5678"
     volumes:
       - n8n_data:/home/node/.n8n
+    # Lets workflow 4 reach the transcription service running natively on this machine
+    # (extractor/transcribe_server.py) at http://host.docker.internal:8765.
+    # Docker Desktop (Mac/Windows) provides this name already; this line adds it on Linux.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       postgres:
         condition: service_healthy

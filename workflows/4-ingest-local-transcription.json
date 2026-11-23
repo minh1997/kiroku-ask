@@ -1,0 +1,835 @@
+{
+  "name": "kiroku-ask 4 - Ingest with local transcription",
+  "nodes": [
+    {
+      "parameters": {
+        "formTitle": "Ingest a video (local transcription first)",
+        "formDescription": "Paste a YouTube link, or the path of a video file on the machine running the transcription service (e.g. ~/Movies/live.mp4). The transcript is made locally with Whisper; YouTube links fall back to Supadata if the local service is not running.",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "YouTube URL or file path",
+              "placeholder": "https://www.youtube.com/watch?v=...  or  ~/Movies/live.mp4",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Title",
+              "placeholder": "Optional: taken from YouTube or the file name"
+            },
+            {
+              "fieldLabel": "Stream date",
+              "fieldType": "date"
+            },
+            {
+              "fieldLabel": "Language",
+              "fieldType": "dropdown",
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "vi"
+                  },
+                  {
+                    "option": "en"
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "options": {
+          "respondWithOptions": {
+            "values": {
+              "formSubmittedText": "Received! Transcription and summary run in the background. Check progress under Executions in n8n."
+            }
+          }
+        }
+      },
+      "id": "a7177537-2196-4e50-8992-fbfb41aebcfd",
+      "name": "Ingest form",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.2,
+      "position": [
+        0,
+        300
+      ],
+      "webhookId": "e8bdb23d-e60d-4ce6-8d65-c999771a8fb0"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Address of transcribe_server.py running natively on this machine (see extractor/README.md)\nconst LOCAL_ASR_URL = 'http://host.docker.internal:8765';\n\nconst form = $('Ingest form').first().json;\nconst raw = String(form['YouTube URL or file path'] || '').trim();\nif (!raw) throw new Error('Enter a YouTube link or a file path.');\n\n// YouTube links (watch, youtu.be, /live/, /shorts/, /embed/) or a bare 11-character ID\nlet videoId = null;\nif (/^https?:\\/\\//i.test(raw) || /^[A-Za-z0-9_-]{11}$/.test(raw)) {\n  const patterns = [\n    /(?:[?&]v=|\\/live\\/|\\/shorts\\/|\\/embed\\/|youtu\\.be\\/)([A-Za-z0-9_-]{11})/,\n    /^([A-Za-z0-9_-]{11})$/,\n  ];\n  for (const p of patterns) {\n    const m = raw.match(p);\n    if (m) { videoId = m[1]; break; }\n  }\n}\nconst isYouTube = !!videoId;\nconst url = isYouTube ? `https://www.youtube.com/watch?v=${videoId}` : null;\n\nreturn [{\n  json: {\n    source: url || raw,           // what the local service receives\n    is_youtube: isYouTube,        // only YouTube links can fall back to Supadata\n    video_id: videoId,            // for files, the local service derives it from the file name\n    url,\n    title_input: String(form['Title'] || '').trim(),\n    date_input: String(form['Stream date'] || '').trim(),\n    language: form['Language'] || 'vi',\n    local_asr_url: LOCAL_ASR_URL,\n  },\n}];\n"
+      },
+      "id": "4e976b3b-1ae9-435c-83ea-5656ee49f2ab",
+      "name": "Prepare input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.local_asr_url }}/jobs",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ source: $json.source, language: $json.language }) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "4002d9fb-b6cc-4e79-bce4-dde3c0783122",
+      "name": "Local: start transcription",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        440,
+        300
+      ],
+      "onError": "continueErrorOutput",
+      "notes": "Errors (service not running, file not found) go to the second output and fall back to Supadata for YouTube links."
+    },
+    {
+      "parameters": {
+        "amount": 15,
+        "unit": "seconds"
+      },
+      "id": "5861344c-75e9-4703-86b6-f8ba0ac42a89",
+      "name": "Wait 15 seconds",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        660,
+        140
+      ],
+      "webhookId": "2297e56a-8f92-4b36-af86-14a84b3aff9c"
+    },
+    {
+      "parameters": {
+        "url": "={{ $('Prepare input').first().json.local_asr_url }}/jobs/{{ $('Local: start transcription').first().json.job_id }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "e2d90c3f-5090-4b6c-a650-5963ca76c51f",
+      "name": "Local: check job",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        880,
+        140
+      ],
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "e19e9b7e-5139-43aa-a7d2-9be4a78fca14",
+              "leftValue": "={{ ['completed', 'failed'].includes($json.status) || !!$json.error || $runIndex >= 480 }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "ecf47dfe-8268-4e3d-a69f-bf7980c2b37e",
+      "name": "Local job finished?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1100,
+        140
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "cd905ea3-3a26-4aa1-bc27-40a361fc0df0",
+              "leftValue": "={{ $json.status === 'completed' && Array.isArray($json.content) && $json.content.length > 0 }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "26f20f92-279c-4381-8107-ca6ffe21e9cf",
+      "name": "Local transcript OK?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1320,
+        140
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "a8d4c9b5-67a0-4b40-b70a-eb629e2eda31",
+              "leftValue": "={{ $('Prepare input').first().json.is_youtube }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "320274ac-3045-4bde-bece-cbb23e8e1dc0",
+      "name": "Fall back to Supadata?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        660,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "errorMessage": "=Local transcription failed: {{ (() => { const e = $('Local job finished?').isExecuted ? $('Local job finished?').last().json : $('Local: start transcription').first().json; if (e.status === 'queued' || e.status === 'active') return 'still running after 2 hours.'; const err = e.error; const msg = String((err && (err.description || err.message)) || err || JSON.stringify(e)).slice(0, 400); if (/ECONNREFUSED|ENOTFOUND|EHOSTUNREACH|ETIMEDOUT|ECONNRESET/.test(msg)) return 'the service is not reachable at ' + $('Prepare input').first().json.local_asr_url + '. Start it on this machine with: python extractor/transcribe_server.py'; return msg; })() }} (Only YouTube links can fall back to Supadata.)"
+      },
+      "id": "15a200b3-15a5-4aa6-9e29-de657d1fdcb7",
+      "name": "Stop: local transcription failed",
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [
+        880,
+        700
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://www.googleapis.com/youtube/v3/videos",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpQueryAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "part",
+              "value": "snippet,contentDetails,liveStreamingDetails"
+            },
+            {
+              "name": "id",
+              "value": "={{ $json.video_id }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "beb453f4-c7d5-4ce1-9014-6157202a198a",
+      "name": "YouTube: video details",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        880,
+        720
+      ],
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true,
+      "notes": "Optional: provides the title and the actual stream start time. Errors are ignored."
+    },
+    {
+      "parameters": {
+        "url": "https://api.supadata.ai/v1/transcript",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "url",
+              "value": "={{ $('Prepare input').first().json.url }}"
+            },
+            {
+              "name": "lang",
+              "value": "={{ $('Prepare input').first().json.language }}"
+            },
+            {
+              "name": "mode",
+              "value": "auto"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 300000
+        }
+      },
+      "id": "7b766039-4eff-47bb-a219-9f26f295f195",
+      "name": "Supadata: get transcript",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1100,
+        720
+      ],
+      "notes": "Long videos may return a jobId instead of the transcript; the loop below polls until it is done."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c49d61d8-c296-4cf0-80af-a33cb78a9b4e",
+              "leftValue": "={{ $json.jobId }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "exists",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "91f71a22-35d3-4e4d-b653-479a91602446",
+      "name": "Needs job polling?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1320,
+        720
+      ]
+    },
+    {
+      "parameters": {
+        "amount": 20,
+        "unit": "seconds"
+      },
+      "id": "fca87611-9ec5-4029-8ec0-ac4624eda99c",
+      "name": "Wait 20 seconds",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        1540,
+        560
+      ],
+      "webhookId": "9abc88f5-c378-48cb-ad3a-25166f38f15e"
+    },
+    {
+      "parameters": {
+        "url": "=https://api.supadata.ai/v1/transcript/{{ $('Supadata: get transcript').first().json.jobId }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "fa97107a-ebb0-4973-8450-890a381328ee",
+      "name": "Supadata: check job",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1760,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "df88b4f0-e3fe-45ef-b738-ed58ab677f77",
+              "leftValue": "={{ ['completed', 'failed'].includes($json.status) || $runIndex >= 44 }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "0f9fbda6-587c-4212-97e6-06aefd007a72",
+      "name": "Job finished?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1980,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Input: the local service's job result or Supadata's response (same content shape).\n// Group the transcript into ~30-second lines stamped [hh:mm:ss], then into 20-minute sections\nconst LINE_MS = 30 * 1000;\nconst CHUNK_MS = 20 * 60 * 1000;\nconst TZ = 'Asia/Ho_Chi_Minh';\n\nconst res = $input.first().json;\n// Set when the transcript comes from the local service (transcribe_server.py)\nconst local = res.video || null;\nif (res.status === 'queued' || res.status === 'active') {\n  throw new Error('Supadata was still processing after 15 minutes. Try again later.');\n}\nif (res.status === 'failed') {\n  throw new Error('Supadata processing failed: ' + JSON.stringify(res.error));\n}\nif (!Array.isArray(res.content) || res.content.length === 0) {\n  throw new Error('Could not get a transcript: ' + (res.message || res.error || JSON.stringify(res).slice(0, 300)));\n}\n\nconst video = $('Prepare input').first().json;\n\n// Details from the YouTube Data API (may be missing if no API key is configured)\nlet yt = null;\ntry {\n  const ytJson = $('YouTube: video details').first().json;\n  yt = (ytJson && Array.isArray(ytJson.items) && ytJson.items[0]) || null;\n} catch (e) { yt = null; }\n\nconst startIso = local?.started_at || yt?.liveStreamingDetails?.actualStartTime || yt?.snippet?.publishedAt || null;\n\n// Stream date in Vietnam time: a date typed into the form wins\nlet streamDate = null;\nif (video.date_input) {\n  let d = DateTime.fromISO(video.date_input, { zone: TZ });\n  if (!d.isValid) d = DateTime.fromFormat(video.date_input, 'dd/MM/yyyy', { zone: TZ });\n  if (!d.isValid) throw new Error('Invalid date entered: ' + video.date_input);\n  streamDate = d.toISODate();\n} else if (startIso) {\n  streamDate = DateTime.fromISO(startIso).setZone(TZ).toISODate();\n} else if (local?.upload_date) {\n  streamDate = local.upload_date;\n}\nif (!streamDate) {\n  throw new Error('Could not determine the stream date. Enter a date in the form or configure the YouTube API key.');\n}\n\nconst fmt = (ms) => {\n  const s = Math.floor(ms / 1000);\n  const h = String(Math.floor(s / 3600)).padStart(2, '0');\n  const m = String(Math.floor((s % 3600) / 60)).padStart(2, '0');\n  const sec = String(s % 60).padStart(2, '0');\n  return `${h}:${m}:${sec}`;\n};\n\nconst segs = res.content\n  .filter((c) => c && typeof c.text === 'string' && c.text.trim())\n  .map((c) => ({ text: c.text.replace(/\\s+/g, ' ').trim(), offset: Number(c.offset) || 0, duration: Number(c.duration) || 0 }))\n  .sort((a, b) => a.offset - b.offset);\n\n// 1) Group into ~30-second lines\nconst lines = [];\nlet cur = null;\nfor (const s of segs) {\n  if (!cur || s.offset - cur.start >= LINE_MS) {\n    if (cur) lines.push(cur);\n    cur = { start: s.offset, parts: [] };\n  }\n  cur.parts.push(s.text);\n}\nif (cur) lines.push(cur);\n\n// 2) Group the lines into 20-minute sections\nconst groups = new Map();\nfor (const l of lines) {\n  const k = Math.floor(l.start / CHUNK_MS);\n  if (!groups.has(k)) groups.set(k, []);\n  groups.get(k).push(`[${fmt(l.start)}] ${l.parts.join(' ')}`);\n}\n\nconst last = segs[segs.length - 1];\nconst endMs = last.offset + last.duration;\n\nlet durationSeconds = local?.duration_seconds || null;\nif (!durationSeconds && yt?.contentDetails?.duration) {\n  const dur = Duration.fromISO(yt.contentDetails.duration);\n  if (dur.isValid) durationSeconds = Math.round(dur.as('seconds'));\n}\nif (!durationSeconds) durationSeconds = Math.round(endMs / 1000);\n\nconst keys = [...groups.keys()].sort((a, b) => a - b);\nconst meta = {\n  video_id: local?.video_id || video.video_id,\n  url: local ? local.url : video.url,\n  stream_date: streamDate,\n  started_at: startIso,\n  title: video.title_input || local?.title || yt?.snippet?.title || `Livestream ${streamDate}`,\n  duration_seconds: durationSeconds,\n  language: res.lang || video.language,\n  source: local?.source || 'youtube',\n  file_path: local?.file_path || null,\n  transcriber: local ? res.transcriber : 'supadata',\n};\n\nreturn keys.map((k, i) => ({\n  json: {\n    ...meta,\n    section: i + 1,\n    section_count: keys.length,\n    start: fmt(k * CHUNK_MS),\n    end: fmt(Math.min((k + 1) * CHUNK_MS, endMs)),\n    content: groups.get(k).join('\\n'),\n  },\n}));\n"
+      },
+      "id": "9bbcf5d3-064b-4746-b02c-f7def5c40286",
+      "name": "Split into 20-minute sections",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1880,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=You are summarizing SECTION {{ $json.section }}/{{ $json.section_count }} (from {{ $json.start }} to {{ $json.end }}) of the livestream \"{{ $json.title }}\" from {{ $json.stream_date }}.\n\nRequirements:\n- Write in Vietnamese, as bullet points.\n- Keep only valuable content: knowledge, facts, numbers, prices, decisions, announcements, important audience questions and their answers.\n- Skip greetings, reading out viewer names, asking for likes/shares, waiting, repetition.\n- Give each point the nearest [hh:mm:ss] timestamp from the transcript.\n- The transcript comes from automatic captions, so spelling and proper names may be wrong: interpret from context and do not add anything that is not in the transcript.\n- If this section has no significant content, write only: \"(No significant content)\".\n\nTranscript:\n{{ $json.content }}"
+      },
+      "id": "dfe0e072-0f12-4441-9cc1-77fd0e916207",
+      "name": "Summarize each section",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.7,
+      "position": [
+        2100,
+        300
+      ],
+      "retryOnFail": true,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "list",
+          "value": "gpt-5-mini"
+        },
+        "options": {}
+      },
+      "id": "0127d980-36f9-4486-a0e5-fb1fd8a6b971",
+      "name": "Section summary model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        2100,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Join the section summaries (in order) into one text for the overall summary\nconst sections = $('Split into 20-minute sections').all();\nconst outs = $input.all();\n\nconst sectionSummaries = sections.map((s, i) => ({\n  section: s.json.section,\n  start: s.json.start,\n  end: s.json.end,\n  summary: String(outs[i]?.json?.text || '').trim(),\n}));\n\nconst { content, section, start, end, ...meta } = sections[0].json;\n\nconst sectionsText = sectionSummaries\n  .map((d) => `### Section ${d.section} (${d.start} – ${d.end})\\n${d.summary}`)\n  .join('\\n\\n');\n\nreturn [{ json: { ...meta, section_summaries: sectionSummaries, sections_text: sectionsText } }];\n"
+      },
+      "id": "c0709730-c45d-4e3e-8e99-bf7ae8669620",
+      "name": "Merge sections",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2420,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Below are the ~20-minute section summaries of the livestream \"{{ $json.title }}\" from {{ $json.stream_date }} (about {{ Math.round(($json.duration_seconds || 0) / 60) }} minutes long).\n\nWrite an overall summary in Vietnamese with this structure (translate the headings into Vietnamese):\n1. **Overview** (2–4 sentences): what the livestream is about.\n2. **Main topics**: grouped by topic, each point keeps its [hh:mm:ss] timestamp.\n3. **Key information**: numbers, prices, dates, announcements, commitments, links mentioned (if any).\n4. **Notable Q&A** with the audience (if any).\n\nDo not add anything that is not in the section summaries. Ignore sections marked \"(No significant content)\".\n\n{{ $json.sections_text }}"
+      },
+      "id": "ac9b047e-9100-4646-badd-f1b1d4cbf077",
+      "name": "Overall summary",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.7,
+      "position": [
+        2640,
+        300
+      ],
+      "retryOnFail": true,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "list",
+          "value": "gpt-5-mini"
+        },
+        "options": {}
+      },
+      "id": "40b46764-1874-452f-900e-1dcba6526d6f",
+      "name": "Overall summary model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        2640,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build one record for the livestreams table\nconst g = $('Merge sections').first().json;\nconst transcript = $('Split into 20-minute sections').all().map((s) => s.json.content).join('\\n');\n\nreturn [{\n  json: {\n    video_id: g.video_id,\n    stream_date: g.stream_date,\n    started_at: g.started_at,\n    title: g.title,\n    url: g.url,\n    duration_seconds: g.duration_seconds,\n    language: g.language,\n    source: g.source,\n    file_path: g.file_path,\n    summary: String($input.first().json.text || '').trim(),\n    section_summaries: JSON.stringify(g.section_summaries),\n    transcript,\n  },\n}];\n"
+      },
+      "id": "e3576502-f88f-4498-b495-dc75f3e7eb29",
+      "name": "Prepare record",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2960,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO livestreams\n  (video_id, stream_date, started_at, title, url, duration_seconds, language, summary, section_summaries, transcript, source, file_path)\nVALUES\n  ($1, $2::date, $3::timestamptz, $4, $5, $6::int, $7, $8, $9::jsonb, $10, $11, $12)\nON CONFLICT (video_id) DO UPDATE SET\n  stream_date = EXCLUDED.stream_date,\n  started_at = EXCLUDED.started_at,\n  title = EXCLUDED.title,\n  url = COALESCE(EXCLUDED.url, livestreams.url),\n  duration_seconds = EXCLUDED.duration_seconds,\n  language = EXCLUDED.language,\n  summary = EXCLUDED.summary,\n  section_summaries = EXCLUDED.section_summaries,\n  transcript = EXCLUDED.transcript,\n  source = EXCLUDED.source,\n  file_path = COALESCE(EXCLUDED.file_path, livestreams.file_path),\n  updated_at = now()\nRETURNING id, video_id, stream_date, title, source;",
+        "options": {
+          "queryReplacement": "={{ [ $json.video_id, $json.stream_date, $json.started_at, $json.title, $json.url, $json.duration_seconds, $json.language, $json.summary, $json.section_summaries, $json.transcript, $json.source, $json.file_path ] }}"
+        }
+      },
+      "id": "25fa6b1d-d41d-4d85-a137-f1c3c2204f44",
+      "name": "Save to Postgres",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        3180,
+        300
+      ],
+      "notes": "Credential: Postgres livestream (write, livestream_app)."
+    },
+    {
+      "parameters": {
+        "content": "## Ingest a video, local transcription first\n1. Start the transcription service on this machine: `python extractor/transcribe_server.py` (mlx-whisper on Apple Silicon, faster-whisper + CUDA on NVIDIA).\n2. Paste a YouTube link or a file path into the form.\n3. The local service downloads the audio (YouTube) and transcribes it with Whisper; n8n polls every 15 s.\n4. If the service is down or fails, YouTube links fall back to Supadata (cloud). File paths stop with an error.\n5. Summarize (20-minute sections → overall) and save to `livestreams`.\n\n**Credentials:** OpenAI, Postgres (livestream_app). Only for the fallback: YouTube API key, Supadata.",
+        "height": 340,
+        "width": 560
+      },
+      "id": "558f1443-28eb-4146-ae4d-d68e73effb97",
+      "name": "Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -40,
+        -260
+      ]
+    }
+  ],
+  "connections": {
+    "YouTube: video details": {
+      "main": [
+        [
+          {
+            "node": "Supadata: get transcript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Supadata: get transcript": {
+      "main": [
+        [
+          {
+            "node": "Needs job polling?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Needs job polling?": {
+      "main": [
+        [
+          {
+            "node": "Wait 20 seconds",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Split into 20-minute sections",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait 20 seconds": {
+      "main": [
+        [
+          {
+            "node": "Supadata: check job",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Supadata: check job": {
+      "main": [
+        [
+          {
+            "node": "Job finished?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Job finished?": {
+      "main": [
+        [
+          {
+            "node": "Split into 20-minute sections",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Wait 20 seconds",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split into 20-minute sections": {
+      "main": [
+        [
+          {
+            "node": "Summarize each section",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Summarize each section": {
+      "main": [
+        [
+          {
+            "node": "Merge sections",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge sections": {
+      "main": [
+        [
+          {
+            "node": "Overall summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Overall summary": {
+      "main": [
+        [
+          {
+            "node": "Prepare record",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare record": {
+      "main": [
+        [
+          {
+            "node": "Save to Postgres",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Section summary model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Summarize each section",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Overall summary model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Overall summary",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ingest form": {
+      "main": [
+        [
+          {
+            "node": "Prepare input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare input": {
+      "main": [
+        [
+          {
+            "node": "Local: start transcription",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Local: start transcription": {
+      "main": [
+        [
+          {
+            "node": "Wait 15 seconds",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fall back to Supadata?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait 15 seconds": {
+      "main": [
+        [
+          {
+            "node": "Local: check job",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Local: check job": {
+      "main": [
+        [
+          {
+            "node": "Local job finished?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Local job finished?": {
+      "main": [
+        [
+          {
+            "node": "Local transcript OK?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Wait 15 seconds",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Local transcript OK?": {
+      "main": [
+        [
+          {
+            "node": "Split into 20-minute sections",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fall back to Supadata?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fall back to Supadata?": {
+      "main": [
+        [
+          {
+            "node": "YouTube: video details",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Stop: local transcription failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Ho_Chi_Minh"
+  },
+  "pinData": {}
+}

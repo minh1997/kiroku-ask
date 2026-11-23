@@ -22,9 +22,11 @@ kiroku-ask/
 ├── workflows/
 │   ├── 1-ingest-and-summarize.json   # YouTube: link → transcript + summary
 │   ├── 2-qa-chat.json                # Q&A chat (8 Postgres tools + segment re-watch)
-│   └── 3-visual-analysis.json        # YouTube: Gemini watches the video → scene log + links
+│   ├── 3-visual-analysis.json        # YouTube: Gemini watches the video → scene log + links
+│   └── 4-ingest-local-transcription.json  # YouTube link or file path → local Whisper → summary
 └── extractor/                  # RUNS ON YOUR MACHINE: ingest video files (NVIDIA GPU / Apple Silicon)
     ├── ingest_video.py         # one command: transcript + summary + OCR + scene log
+    ├── transcribe_server.py    # local Whisper service that workflow 4 calls
     └── README.md               # per-platform setup
 ```
 
@@ -38,6 +40,8 @@ kiroku-ask/
 | Scene log | Gemini reads the YouTube link | Gemini reads the uploaded file |
 | Works with private videos | No | Yes |
 | Must wait for YouTube processing | Yes (~30–60 minutes after the stream ends) | No |
+
+**Workflow 4** sits in between: an n8n form like workflow 1, but the transcript is made by Whisper **on your own machine** (`extractor/transcribe_server.py`, Metal on Apple Silicon, CUDA on NVIDIA). It accepts a YouTube link (only the audio is downloaded, with yt-dlp) or the path of a video file on that machine. If the local service is not running, YouTube links fall back to Supadata automatically.
 
 One Postgres container holds 2 databases:
 
@@ -180,7 +184,14 @@ Workflows → **Import from File** → pick each file in `workflows/`, then assi
 - `Look up livestream`, `Save scenes & links` → Postgres livestream (**write**)
 - `Gemini: analyze chunk` → Gemini
 
-Set all three workflows to **Active**.
+**Workflow 4 – Ingest with local transcription**
+
+- `Section summary model`, `Overall summary model` → OpenAI
+- `Save to Postgres` → Postgres livestream (**write**)
+- Only for the Supadata fallback: `YouTube: video details` → YouTube API key, `Supadata: …` → Supadata
+- The local nodes need no credential. They call `http://host.docker.internal:8765` (set in the *Prepare input* node).
+
+Set the workflows you use to **Active**. Workflow 4 needs n8n and the transcription service on the same machine; on a VPS it can only use the Supadata fallback (unless you forward the service's port to the VPS).
 
 ## 5. Usage
 
@@ -191,7 +202,16 @@ Set all three workflows to **Active**.
 - Processing takes a few minutes. Follow progress in the **Executions** tab.
 - Ingesting the same video again **updates** the existing row instead of creating a duplicate.
 
-**Visual analysis** (after ingesting with workflow 1): open the workflow 3 form → paste the same link.
+**Ingest with local transcription (workflow 4):** first start the service on your machine and leave it running:
+
+```bash
+cd extractor && source .venv/bin/activate
+python transcribe_server.py      # http://127.0.0.1:8765, mlx-whisper on a Mac
+```
+
+Then open the workflow 4 form and paste a YouTube link, or a file path on that machine such as `~/Movies/live.mp4`. n8n checks on the job every 15 seconds (for up to 2 hours). How long transcription takes depends on the chip and the Whisper model; `whisper-large-v3-turbo` is several times faster than `large-v3`. The summary and the save to Postgres are the same as workflow 1. Run `ingest_video.py` afterwards if you also want OCR or the scene log for a file.
+
+**Visual analysis** (after ingesting with workflow 1 or 4): open the workflow 3 form → paste the same link.
 
 - Gemini watches the video in 10-minute chunks, 1 frame per second, with audio.
 - It writes a **scene log** (each time the picture changes: slide change, a web page opened, a change of clothes, a product held up…) with colours and on-screen text, plus a **list of links** seen on screen or read out loud.
@@ -252,6 +272,9 @@ If you need it later, switch the Docker image to `pgvector/pgvector`, add a vect
 | `extractor` cannot connect to Postgres | Is the SSH tunnel still running? Does `PG_DSN` use the tunnel's local port (`5433`)? Try `psql "$PG_DSN" -c 'select 1'`. |
 | Workflow 3 says `column "produced_by" does not exist` | The database is missing migration 03 — run the commands in section 1. |
 | n8n is not reachable on the domain | Does DNS point at the VPS, are ports 80/443 open, did you start with `--profile https`? See `docker compose logs caddy`. |
+| Workflow 4: `the service is not reachable at http://host.docker.internal:8765` | `transcribe_server.py` is not running, or listens on another port. Check `curl localhost:8765/health`. On Linux, start it with `--host 172.17.0.1`. |
+| Workflow 4: `File not found on the machine running the transcription service` | The path is resolved on the machine running the service, not inside Docker. Use an absolute path (`~/...` works). |
+| Workflow 4: `still running after 2 hours` | Very long video or a slow CPU-only backend. Raise the `480` limit in *Local job finished?* or use a smaller Whisper model. |
 | The agent does not use `search_screen_text` | That video has no OCR data (`ocr_at` is empty) — run `ingest_video.py`. |
 | A tool returns nothing although data exists | Check the `stream_date` column (Vietnam time) — a 6 a.m. stream in Vietnam is the previous day in UTC; the workflow converts this automatically. |
 

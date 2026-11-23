@@ -8,8 +8,8 @@ Examples:
   # PC with an NVIDIA GPU
   python ingest_video.py video.mp4 --date 2026-11-10 --title "Live 10/11"
 
-  # Apple Silicon Mac
-  python ingest_video.py video.mp4 --asr mlx-whisper
+  # Apple Silicon Mac (mlx-whisper is picked automatically)
+  python ingest_video.py video.mp4
 
   # Re-run a single step only (the other steps stay as they are in the database)
   python ingest_video.py video.mp4 --asr none --ocr none --visual gemini
@@ -19,10 +19,8 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
-import re
 import sys
 import tempfile
-import unicodedata
 from pathlib import Path
 
 import asr
@@ -30,14 +28,6 @@ import db
 import frames
 import gemini
 import util
-
-
-def make_video_id(path: Path) -> str:
-    """Stable ID derived from the file name, so re-running the same file updates the same row."""
-    s = unicodedata.normalize("NFD", path.stem)
-    s = "".join(c for c in s if unicodedata.category(c) != "Mn").lower()
-    s = re.sub(r"[^a-z0-9]+", "-", s).strip("-")
-    return ("file-" + s)[:120] or "file-unnamed"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -48,10 +38,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--video-id", help="ID in the database (default: derived from the file name)")
     p.add_argument("--language", default="vi", help="Language code for ASR and OCR (default: vi)")
 
-    p.add_argument("--asr", default="faster-whisper",
-                   choices=["faster-whisper", "mlx-whisper", "gemini", "none"],
-                   help="Speech-to-text backend. mlx-whisper for Apple Silicon; none to skip.")
-    p.add_argument("--whisper-model", help="Whisper model name (default: PhoWhisper for Vietnamese)")
+    p.add_argument("--asr", default="auto",
+                   choices=["auto", "faster-whisper", "mlx-whisper", "gemini", "none"],
+                   help="Speech-to-text backend. auto = mlx-whisper on Apple Silicon, "
+                        "faster-whisper elsewhere; none to skip.")
+    p.add_argument("--whisper-model", help="Whisper model name (default: see asr.DEFAULT_MODELS)")
     p.add_argument("--ocr", default="auto", choices=["auto", "paddleocr", "easyocr", "none"],
                    help="OCR engine for on-screen text")
     p.add_argument("--visual", default="gemini", choices=["gemini", "none"],
@@ -73,7 +64,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"File not found: {video}", file=sys.stderr)
         return 1
 
-    video_id = args.video_id or make_video_id(video)
+    if args.asr == "auto":
+        args.asr = asr.default_backend()
+
+    video_id = args.video_id or util.make_video_id(video)
     stream_date = args.date or dt.datetime.fromtimestamp(video.stat().st_mtime).strftime("%Y-%m-%d")
     try:
         dt.date.fromisoformat(stream_date)
